@@ -63,30 +63,7 @@ The name "Fractal Reader" reflects the core insight: just as every part of a fra
 
 ## Under the Hood
 
-The extension uses Claude Sonnet with a custom prompt that transforms any text fragment into a research entry point across four epistemological axes:
-
-```
-You are a research assistant. The user is reading an article and has
-highlighted a text fragment for deep analysis.
-
-Analyze the provided fragment and give a structured response:
-
-## 1. DIALECTICS
-What different schools of thought, theoretical positions, or viewpoints
-exist on this topic? Describe 2-4 positions.
-
-## 2. REFERENCES FOR STUDY
-What concepts, books, authors, or theories will help understand this
-deeper? Give 3-5 specific recommendations.
-
-## 3. CONNECTIONS TO OTHER FIELDS
-Where do similar ideas, patterns, or principles appear in other domains?
-Give 2-4 examples of analogical transfer.
-
-## 4. QUESTIONS FOR YOURSELF
-What questions can the reader ask themselves to deeply reflect on this
-material? Formulate 3-5 reflective questions.
-```
+The extension uses Claude Sonnet with a custom prompt that transforms any text fragment into a research entry point across four epistemological axes.
 
 ## Value Proposition
 
