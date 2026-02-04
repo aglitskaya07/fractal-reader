@@ -17,8 +17,8 @@
   --fr-border: rgba(0, 0, 0, 0.08);
   --fr-radius: 16px;
   --fr-radius-sm: 10px;
-  --fr-success: #10b981;
-  --fr-error: #ef4444;
+  --fr-success: #6b7280;
+  --fr-error: #6b7280;
 }
 
 * {

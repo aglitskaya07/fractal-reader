@@ -3,18 +3,10 @@
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL = 'claude-sonnet-4-20250514';
 
-// Build the analysis prompt
-function buildPrompt(title, url, selectedText) {
-  return `Ты — исследовательский ассистент. Пользователь читает статью и выделил фрагмент текста для глубокого анализа.
+// System prompt (will be cached)
+const SYSTEM_PROMPT = `Ты — исследовательский ассистент. Пользователь читает статью и выделил фрагмент текста для глубокого анализа.
 
-Контекст страницы:
-- Заголовок: ${title}
-- URL: ${url}
-
-Выделенный фрагмент:
-${selectedText}
-
-Проанализируй этот фрагмент и предоставь:
+Проанализируй предоставленный фрагмент и дай структурированный ответ:
 
 ## 1. ДИАЛЕКТИКА
 Какие разные школы мысли, теоретические позиции или точки зрения существуют по затронутому вопросу? Опиши 2-4 позиции, укажи названия школ/направлений, если применимо.
@@ -29,10 +21,19 @@ ${selectedText}
 Какие вопросы читатель может задать себе, чтобы глубже осмыслить этот материал? Сформулируй 3-5 рефлексивных вопросов, которые помогут критически проанализировать идею, связать её с личным опытом или применить на практике.
 
 Отвечай структурированно, кратко, по существу. Используй markdown для форматирования.`;
+
+// Build user message with context
+function buildUserMessage(title, url, selectedText) {
+  return `Контекст страницы:
+- Заголовок: ${title}
+- URL: ${url}
+
+Выделенный фрагмент:
+${selectedText}`;
 }
 
-// Call Anthropic API
-async function callAnthropicAPI(apiKey, prompt) {
+// Call Anthropic API with prompt caching
+async function callAnthropicAPI(apiKey, userMessage) {
   const response = await fetch(ANTHROPIC_API_URL, {
     method: 'POST',
     headers: {
@@ -43,11 +44,18 @@ async function callAnthropicAPI(apiKey, prompt) {
     },
     body: JSON.stringify({
       model: MODEL,
-      max_tokens: 2048,
+      max_tokens: 1536,
+      system: [
+        {
+          type: 'text',
+          text: SYSTEM_PROMPT,
+          cache_control: { type: 'ephemeral' }
+        }
+      ],
       messages: [
         {
           role: 'user',
-          content: prompt
+          content: userMessage
         }
       ]
     })
@@ -84,9 +92,9 @@ async function handleAnalyzeRequest(request, tabId) {
     throw new Error('API-ключ не настроен. Откройте настройки расширения.');
   }
 
-  // Build prompt and call API
-  const prompt = buildPrompt(title, url, selectedText);
-  const result = await callAnthropicAPI(apiKey, prompt);
+  // Build user message and call API
+  const userMessage = buildUserMessage(title, url, selectedText);
+  const result = await callAnthropicAPI(apiKey, userMessage);
 
   return result;
 }
