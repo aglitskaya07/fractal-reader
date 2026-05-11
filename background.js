@@ -32,72 +32,139 @@ function buildUserMessage(title, url, selectedText) {
 ${selectedText}`;
 }
 
-// Call Anthropic API with prompt caching
-async function callAnthropicAPI(apiKey, userMessage) {
-  const response = await fetch(ANTHROPIC_API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true'
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      max_tokens: 1536,
-      system: [
-        {
-          type: 'text',
-          text: SYSTEM_PROMPT,
-          cache_control: { type: 'ephemeral' }
-        }
-      ],
-      messages: [
-        {
-          role: 'user',
-          content: userMessage
-        }
-      ]
-    })
-  });
+// Stream Anthropic API response via SSE
+async function streamAnthropicAPI(apiKey, userMessage, onChunk, onDone, onError) {
+  let response;
+  try {
+    response = await fetch(ANTHROPIC_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        max_tokens: 1536,
+        stream: true,
+        system: [
+          {
+            type: 'text',
+            text: SYSTEM_PROMPT,
+            cache_control: { type: 'ephemeral' }
+          }
+        ],
+        messages: [
+          {
+            role: 'user',
+            content: userMessage
+          }
+        ]
+      })
+    });
+  } catch (e) {
+    onError(e?.message || 'Network error');
+    return;
+  }
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error?.message || `API error: ${response.status}`);
+    onError(errorData.error?.message || `API error: ${response.status}`);
+    return;
   }
 
-  const data = await response.json();
-  return data.content[0].text;
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    let chunk;
+    try {
+      chunk = await reader.read();
+    } catch (e) {
+      onError(e?.message || 'Stream read error');
+      return;
+    }
+    if (chunk.done) break;
+
+    buffer += decoder.decode(chunk.value, { stream: true });
+
+    let sep;
+    while ((sep = buffer.indexOf('\n\n')) !== -1) {
+      const rawEvent = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+
+      const dataLines = rawEvent
+        .split('\n')
+        .filter(l => l.startsWith('data:'))
+        .map(l => l.slice(5).trim());
+      if (dataLines.length === 0) continue;
+
+      const dataStr = dataLines.join('');
+      if (!dataStr || dataStr === '[DONE]') continue;
+
+      let payload;
+      try {
+        payload = JSON.parse(dataStr);
+      } catch {
+        continue;
+      }
+
+      if (payload.type === 'content_block_delta' && payload.delta?.type === 'text_delta') {
+        onChunk(payload.delta.text);
+      } else if (payload.type === 'error') {
+        onError(payload.error?.message || 'Stream error');
+        return;
+      }
+    }
+  }
+
+  onDone();
 }
 
-// Listen for messages from content script
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === 'analyze') {
-    handleAnalyzeRequest(request, sender.tab?.id)
-      .then(result => sendResponse({ success: true, data: result }))
-      .catch(error => sendResponse({ success: false, error: error.message }));
+// Long-lived port for streaming analysis
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'analyze') return;
 
-    // Return true to indicate async response
-    return true;
-  }
+  const safePost = (msg) => {
+    try { port.postMessage(msg); } catch {}
+  };
+
+  port.onMessage.addListener(async (request) => {
+    if (request.action !== 'analyze') return;
+
+    const { apiKey } = await chrome.storage.local.get('apiKey');
+    if (!apiKey) {
+      safePost({ type: 'error', error: 'API-ключ не настроен. Откройте настройки расширения.' });
+      try { port.disconnect(); } catch {}
+      return;
+    }
+
+    const userMessage = buildUserMessage(request.title, request.url, request.selectedText);
+
+    await streamAnthropicAPI(
+      apiKey,
+      userMessage,
+      (text) => safePost({ type: 'chunk', text }),
+      () => {
+        safePost({ type: 'done' });
+        try { port.disconnect(); } catch {}
+      },
+      (error) => {
+        safePost({ type: 'error', error });
+        try { port.disconnect(); } catch {}
+      }
+    );
+  });
 });
 
-async function handleAnalyzeRequest(request, tabId) {
-  const { title, url, selectedText } = request;
-
-  // Get API key from storage
-  const { apiKey } = await chrome.storage.local.get('apiKey');
-
-  if (!apiKey) {
-    throw new Error('API-ключ не настроен. Откройте настройки расширения.');
+// Lightweight ping handler to keep service worker warm
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request?.type === 'ping') {
+    sendResponse({ ok: true });
   }
-
-  // Build user message and call API
-  const userMessage = buildUserMessage(title, url, selectedText);
-  const result = await callAnthropicAPI(apiKey, userMessage);
-
-  return result;
-}
+});
 
 // Update icon when extension is installed
 chrome.runtime.onInstalled.addListener(() => {

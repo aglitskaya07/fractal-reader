@@ -214,6 +214,7 @@
         overflow-y: auto;
         padding: 0;
         max-height: 500px;
+        scrollbar-gutter: stable;
       }
 
       .fr-tab-content {
@@ -738,6 +739,11 @@
     triggerButton.style.display = 'flex';
     triggerButton.style.left = `${x + 10}px`;
     triggerButton.style.top = `${y - 30}px`;
+
+    // Warm up service worker so the analyze click doesn't pay cold-start latency
+    try {
+      chrome.runtime.sendMessage({ type: 'ping' }).catch(() => {});
+    } catch {}
   }
 
   // Hide trigger button
@@ -767,14 +773,13 @@
     });
   }
 
-  // Handle analyze request
-  async function handleAnalyze(e) {
+  // Handle analyze request (streaming)
+  function handleAnalyze(e) {
     e.preventDefault();
     e.stopPropagation();
 
     if (!currentSelection) return;
 
-    // Save context
     currentContext = {
       title: document.title,
       url: window.location.href,
@@ -786,33 +791,76 @@
     showLoading(true);
     hideError();
 
-    try {
-      // Check if extension context is valid
-      if (!chrome?.runtime?.id) {
-        throw new Error('Расширение было обновлено. Перезагрузите страницу (F5).');
-      }
-
-      const response = await chrome.runtime.sendMessage({
-        action: 'analyze',
-        title: currentContext.title,
-        url: currentContext.url,
-        selectedText: currentSelection
-      });
-
-      if (response.success) {
-        displayResults(response.data);
-      } else {
-        showError(response.error || 'Произошла ошибка');
-      }
-    } catch (error) {
-      showError(error.message || 'Не удалось связаться с расширением');
-    } finally {
+    if (!chrome?.runtime?.id) {
+      showError('Расширение было обновлено. Перезагрузите страницу (F5).');
       showLoading(false);
+      return;
     }
+
+    let port;
+    try {
+      port = chrome.runtime.connect({ name: 'analyze' });
+    } catch (err) {
+      showError('Не удалось связаться с расширением');
+      showLoading(false);
+      return;
+    }
+
+    let buffer = '';
+    let receivedFirstChunk = false;
+    let finished = false;
+
+    port.onMessage.addListener((msg) => {
+      if (msg.type === 'chunk') {
+        buffer += msg.text;
+        if (!receivedFirstChunk) {
+          receivedFirstChunk = true;
+          showLoading(false);
+          switchTab('dialectics');
+        }
+        renderPartial(buffer);
+      } else if (msg.type === 'done') {
+        finished = true;
+        finalizeRender(buffer);
+      } else if (msg.type === 'error') {
+        finished = true;
+        showError(msg.error || 'Произошла ошибка');
+        showLoading(false);
+      }
+    });
+
+    port.onDisconnect.addListener(() => {
+      if (finished) return;
+      const lastErr = chrome.runtime.lastError;
+      showError(lastErr?.message || 'Соединение прервано');
+      showLoading(false);
+    });
+
+    port.postMessage({
+      action: 'analyze',
+      title: currentContext.title,
+      url: currentContext.url,
+      selectedText: currentSelection
+    });
   }
 
-  // Display results
-  function displayResults(markdown) {
+  // Incremental render during streaming (no + buttons, no tab switch)
+  function renderPartial(markdown) {
+    const sections = parseMarkdownSections(markdown);
+
+    const dialecticsEl = resultPopup.querySelector('[data-content="dialectics"]');
+    const referencesEl = resultPopup.querySelector('[data-content="references"]');
+    const connectionsEl = resultPopup.querySelector('[data-content="connections"]');
+    const questionsEl = resultPopup.querySelector('[data-content="questions"]');
+
+    dialecticsEl.innerHTML = sections.dialectics ? renderMarkdown(sections.dialectics) : '';
+    referencesEl.innerHTML = sections.references ? renderMarkdown(sections.references) : '';
+    connectionsEl.innerHTML = sections.connections ? renderMarkdown(sections.connections) : '';
+    questionsEl.innerHTML = sections.questions ? renderMarkdown(sections.questions) : '';
+  }
+
+  // Finalize after stream completes — fill empty sections and attach + buttons
+  function finalizeRender(markdown) {
     const sections = parseMarkdownSections(markdown);
 
     const dialecticsEl = resultPopup.querySelector('[data-content="dialectics"]');
@@ -825,13 +873,7 @@
     connectionsEl.innerHTML = renderMarkdown(sections.connections || 'Нет данных');
     questionsEl.innerHTML = renderMarkdown(sections.questions || 'Нет данных');
 
-    // Add + buttons to all list items
     addPlusButtonsToLists();
-
-    // Deep dive buttons are now handled in addPlusButtonsToLists()
-
-    // Switch to first tab
-    switchTab('dialectics');
   }
 
   // Add + buttons to all content items (li and p elements)
@@ -859,8 +901,28 @@
     const textContent = el.textContent.trim();
     if (!textContent) return;
 
-    // Wrap existing content in span
-    const span = document.createElement('span');
+    // Reuse existing wrapper if renderMarkdown already produced one
+    let span = el.querySelector(':scope > .fr-item-text');
+    if (span) {
+      // Already wrapped — just append the button below
+      const btn = document.createElement('button');
+      btn.className = 'fr-dive-btn';
+      btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7"/><path d="M7 7h10v10"/></svg>`;
+      btn.title = 'Обсудить с Claude';
+      btn.setAttribute('data-concept', textContent);
+      el.appendChild(btn);
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const concept = btn.getAttribute('data-concept');
+        const url = createDeepDiveUrl(concept);
+        window.open(url, '_blank');
+      });
+      return;
+    }
+
+    // No wrapper yet — wrap existing content in span
+    span = document.createElement('span');
     span.className = 'fr-item-text';
     span.innerHTML = el.innerHTML;
 
@@ -946,13 +1008,13 @@ ${currentContext.selectedText}`;
       // Check if it's a list (starts with - * • or number)
       if (/^[-*•]\s+|^\d+\.\s+/.test(block)) {
         const items = block
-          .replace(/^[-*•]\s+(.+)$/gm, '<li>$1</li>')
-          .replace(/^\d+\.\s+(.+)$/gm, '<li>$1</li>');
+          .replace(/^[-*•]\s+(.+)$/gm, '<li><span class="fr-item-text">$1</span></li>')
+          .replace(/^\d+\.\s+(.+)$/gm, '<li><span class="fr-item-text">$1</span></li>');
         return `<ul>${items}</ul>`;
       }
 
       // Otherwise it's a paragraph
-      return `<p>${block}</p>`;
+      return `<p><span class="fr-item-text">${block}</span></p>`;
     }).join('\n');
 
     // Apply inline formatting
