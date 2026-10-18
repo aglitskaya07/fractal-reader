@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Fractal Reader — Design Demo</title>
+  <style>
+    body {
+      font-family: Georgia, serif;
+      max-width: 680px;
+      margin: 0 auto;
+      padding: 60px 24px;
+      line-height: 1.8;
+      font-size: 18px;
+      color: #222;
+      background: #fdfdfb;
+    }
+    h1 { font-size: 28px; }
+  </style>
+</head>
+<body>
+  <h1>Метафора и смысл</h1>
+  <p id="target">
+    Метафора — это не украшение речи, а фундаментальный механизм мышления.
+    Когда мы говорим, что «время — деньги», мы не просто сравниваем, мы переносим
+    целую систему понятий из одной области в другую. Лакофф и Джонсон показали,
+    что наша концептуальная система по своей природе метафорична.
+  </p>
+  <p>
+    Выделите абзац выше — появится кнопка-лупа. Нажмите её, чтобы увидеть
+    попап с фейковым стримингом ответа.
+  </p>
+
+  <script>
+    // Force open shadow roots so the demo can be driven programmatically
+    const origAttachShadow = Element.prototype.attachShadow;
+    Element.prototype.attachShadow = function (init) {
+      return origAttachShadow.call(this, { ...init, mode: 'open' });
+    };
+
+    // Stub chrome.runtime so content.js works outside the extension
+    const FAKE_RESPONSE = `## ДИАЛЕКТИКА
+
+**Когнитивная лингвистика (Лакофф):** метафора — основа мышления, концепты структурированы метафорически.
+
+**Аналитическая традиция (Дэвидсон):** метафора не несёт особого «метафорического значения» — лишь буквальное.
+
+- Романтики видели в метафоре источник творческого познания
+- Позитивисты считали её угрозой ясности научного языка
+
+## ОТСЫЛКИ
+
+- Лакофф, Джонсон — «Метафоры, которыми мы живём» (1980)
+- Поль Рикёр — «Живая метафора» (1975)
+- Макс Блэк — «Модели и метафоры» (1962)
+
+## СВЯЗИ
+
+- **Биология:** перенос генов между видами как «метафора» на молекулярном уровне
+- **Программирование:** паттерны проектирования — перенос решений между доменами
+- **Музыка:** транспозиция темы в другую тональность
+
+## ВОПРОСЫ
+
+- Какие метафоры структурируют ваше понимание собственной работы?
+- Что меняется, когда вы заменяете метафору «борьбы» на метафору «танца»?
+- Какую идею из вашей области можно перенести в совершенно чужую?`;
+
+    window.chrome = {
+      runtime: {
+        id: 'demo',
+        sendMessage: () => Promise.resolve(),
+        connect: () => {
+          const listeners = [];
+          return {
+            onMessage: { addListener: (fn) => listeners.push(fn) },
+            onDisconnect: { addListener: () => {} },
+            postMessage: () => {
+              // Mirror background.js: four parallel streams, one per tab
+              const parts = FAKE_RESPONSE.split(/^## [^\n]+\n/m).slice(1);
+              const axes = ['dialectics', 'references', 'connections', 'questions'];
+              let pending = axes.length;
+              axes.forEach((axis, n) => {
+                const chunks = parts[n].match(/[\s\S]{1,20}/g);
+                let i = 0;
+                const interval = setInterval(() => {
+                  if (i < chunks.length) {
+                    listeners.forEach(fn => fn({ type: 'chunk', axis, text: chunks[i++] }));
+                  } else {
+                    clearInterval(interval);
+                    listeners.forEach(fn => fn({ type: 'done', axis }));
+                    if (--pending === 0) listeners.forEach(fn => fn({ type: 'all-done' }));
+                  }
+                }, 15 + n * 5);
+              });
+            },
+            disconnect: () => {}
+          };
+        }
+      }
+    };
+  </script>
+  <script src="../content.js"></script>
+</body>
+</html>

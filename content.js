@@ -16,6 +16,7 @@
   let resultPopup = null;
   let currentSelection = '';
   let currentContext = { title: '', url: '' };
+  let activePort = null;
 
   // Get CSS for injection into Shadow DOM
   function getStyles() {
@@ -799,33 +800,72 @@
 
     let port;
     try {
+      // A new selection replaces the old analysis: drop its stream so the
+      // two don't write into the same tabs (and its requests get aborted)
+      if (activePort) {
+        try { activePort.disconnect(); } catch {}
+      }
       port = chrome.runtime.connect({ name: 'analyze' });
+      activePort = port;
     } catch (err) {
       showError('Не удалось связаться с расширением');
       showLoading(false);
       return;
     }
 
-    let buffer = '';
+    const AXES = ['dialectics', 'references', 'connections', 'questions'];
+    const buffers = {};
+    const dirty = new Set();
+    const failed = {};
     let receivedFirstChunk = false;
     let finished = false;
+    let frameScheduled = false;
+
+    AXES.forEach(axis => {
+      buffers[axis] = '';
+      getAxisEl(axis).innerHTML = '';
+    });
+
+    // Chunks arrive far more often than the screen repaints: re-render at
+    // most once per frame, and only the tabs that actually changed
+    const flush = () => {
+      frameScheduled = false;
+      dirty.forEach(axis => {
+        getAxisEl(axis).innerHTML = renderMarkdown(buffers[axis]);
+      });
+      dirty.clear();
+    };
 
     port.onMessage.addListener((msg) => {
       if (msg.type === 'chunk') {
-        buffer += msg.text;
+        buffers[msg.axis] += msg.text;
         if (!receivedFirstChunk) {
           receivedFirstChunk = true;
           showLoading(false);
           switchTab('dialectics');
         }
-        renderPartial(buffer);
+        dirty.add(msg.axis);
+        if (!frameScheduled) {
+          frameScheduled = true;
+          requestAnimationFrame(flush);
+        }
       } else if (msg.type === 'done') {
-        finished = true;
-        finalizeRender(buffer);
+        dirty.delete(msg.axis);
+        finalizeAxis(msg.axis, buffers[msg.axis]);
       } else if (msg.type === 'error') {
+        dirty.delete(msg.axis);
+        failed[msg.axis] = msg.error || 'Произошла ошибка';
+        getAxisEl(msg.axis).textContent = failed[msg.axis];
+      } else if (msg.type === 'all-done') {
         finished = true;
-        showError(msg.error || 'Произошла ошибка');
-        showLoading(false);
+        // Every request failed the same way (bad key, no network) — one message is enough
+        if (AXES.every(axis => failed[axis])) {
+          showError(failed[AXES[0]]);
+          showLoading(false);
+        } else if (!receivedFirstChunk) {
+          showLoading(false);
+          switchTab('dialectics');
+        }
       }
     });
 
@@ -844,47 +884,26 @@
     });
   }
 
-  // Incremental render during streaming (no + buttons, no tab switch)
-  function renderPartial(markdown) {
-    const sections = parseMarkdownSections(markdown);
-
-    const dialecticsEl = resultPopup.querySelector('[data-content="dialectics"]');
-    const referencesEl = resultPopup.querySelector('[data-content="references"]');
-    const connectionsEl = resultPopup.querySelector('[data-content="connections"]');
-    const questionsEl = resultPopup.querySelector('[data-content="questions"]');
-
-    dialecticsEl.innerHTML = sections.dialectics ? renderMarkdown(sections.dialectics) : '';
-    referencesEl.innerHTML = sections.references ? renderMarkdown(sections.references) : '';
-    connectionsEl.innerHTML = sections.connections ? renderMarkdown(sections.connections) : '';
-    questionsEl.innerHTML = sections.questions ? renderMarkdown(sections.questions) : '';
+  function getAxisEl(axis) {
+    return resultPopup.querySelector(`[data-content="${axis}"]`);
   }
 
-  // Finalize after stream completes — fill empty sections and attach + buttons
-  function finalizeRender(markdown) {
-    const sections = parseMarkdownSections(markdown);
-
-    const dialecticsEl = resultPopup.querySelector('[data-content="dialectics"]');
-    const referencesEl = resultPopup.querySelector('[data-content="references"]');
-    const connectionsEl = resultPopup.querySelector('[data-content="connections"]');
-    const questionsEl = resultPopup.querySelector('[data-content="questions"]');
-
-    dialecticsEl.innerHTML = renderMarkdown(sections.dialectics || 'Нет данных');
-    referencesEl.innerHTML = renderMarkdown(sections.references || 'Нет данных');
-    connectionsEl.innerHTML = renderMarkdown(sections.connections || 'Нет данных');
-    questionsEl.innerHTML = renderMarkdown(sections.questions || 'Нет данных');
-
-    addPlusButtonsToLists();
+  // One tab's stream has ended — final render and deep-dive buttons
+  function finalizeAxis(axis, markdown) {
+    const el = getAxisEl(axis);
+    el.innerHTML = renderMarkdown(markdown.trim() || 'Нет данных');
+    addPlusButtonsToLists(el);
   }
 
   // Add + buttons to all content items (li and p elements)
-  function addPlusButtonsToLists() {
+  function addPlusButtonsToLists(root) {
     // Add to list items
-    resultPopup.querySelectorAll('.fr-tab-content li').forEach(el => {
+    root.querySelectorAll('li').forEach(el => {
       addDiveButtonToElement(el);
     });
 
     // Add to paragraphs (but not empty ones or ones that are just whitespace)
-    resultPopup.querySelectorAll('.fr-tab-content p').forEach(el => {
+    root.querySelectorAll('p').forEach(el => {
       const text = el.textContent.trim();
       // Skip very short paragraphs or empty ones
       if (text.length > 20) {
@@ -948,38 +967,26 @@
     });
   }
 
-  // Parse markdown sections
-  function parseMarkdownSections(markdown) {
-    const sections = {
-      dialectics: '',
-      references: '',
-      connections: '',
-      questions: ''
-    };
-
-    // Split by headers
-    const dialecticsMatch = markdown.match(/#+\s*(?:1\.?\s*)?ДИАЛЕКТИКА\s*([\s\S]*?)(?=#+\s*(?:2\.?\s*)?ОТСЫЛКИ|$)/i);
-    const referencesMatch = markdown.match(/#+\s*(?:2\.?\s*)?ОТСЫЛКИ[^\n]*\s*([\s\S]*?)(?=#+\s*(?:3\.?\s*)?СВЯЗИ|$)/i);
-    const connectionsMatch = markdown.match(/#+\s*(?:3\.?\s*)?СВЯЗИ[^\n]*\s*([\s\S]*?)(?=#+\s*(?:4\.?\s*)?ВОПРОСЫ|$)/i);
-    const questionsMatch = markdown.match(/#+\s*(?:4\.?\s*)?ВОПРОСЫ[^\n]*\s*([\s\S]*?)$/i);
-
-    if (dialecticsMatch) sections.dialectics = dialecticsMatch[1].trim();
-    if (referencesMatch) sections.references = referencesMatch[1].trim();
-    if (connectionsMatch) sections.connections = connectionsMatch[1].trim();
-    if (questionsMatch) sections.questions = questionsMatch[1].trim();
-
-    return sections;
+  // Create Claude.ai deep dive URL
+  // Cyrillic costs 6 URL characters per letter once percent-encoded, so a
+  // long highlight turns into a tens-of-kilobytes link. Trim on a word
+  // boundary rather than mid-word.
+  function clampForUrl(text, limit) {
+    const value = (text || '').trim();
+    if (value.length <= limit) return value;
+    const cut = value.slice(0, limit);
+    const lastSpace = cut.lastIndexOf(' ');
+    return (lastSpace > limit * 0.6 ? cut.slice(0, lastSpace) : cut).trim() + '…';
   }
 
-  // Create Claude.ai deep dive URL
   function createDeepDiveUrl(concept) {
     const prompt = `Я читаю статью "${currentContext.title}" (${currentContext.url})
 
 Помоги мне глубже разобраться с этой концепцией/вопросом:
-${concept}
+${clampForUrl(concept, 600)}
 
 Контекст моего чтения:
-${currentContext.selectedText}`;
+${clampForUrl(currentContext.selectedText, 1200)}`;
 
     const encodedPrompt = encodeURIComponent(prompt);
     return `https://claude.ai/new?q=${encodedPrompt}`;
