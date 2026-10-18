@@ -1,8 +1,18 @@
 // Fractal Reader — Background Service Worker
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
-// Fastest current model; thinking off and low effort keep time-to-first-token short
-const MODEL = 'claude-haiku-5-5';
+// Haiku is fast enough for reasoning over the text; references need real
+// books and authors, where a small model is more likely to invent them.
+// Each model turns thinking off its own way: Sonnet 5.5 rejects 'disabled'.
+const FAST_MODEL = { model: 'claude-haiku-5-5', thinking: { type: 'disabled' } };
+const ACCURATE_MODEL = { model: 'claude-sonnet-5-5', thinking: { type: 'between_tools' } };
+
+const AXIS_MODELS = {
+  dialectics: FAST_MODEL,
+  references: ACCURATE_MODEL,
+  connections: FAST_MODEL,
+  questions: FAST_MODEL
+};
 
 const BASE_PROMPT = `Ты — исследовательский ассистент. Пользователь читает статью и выделил фрагмент текста для глубокого анализа.`;
 
@@ -33,7 +43,7 @@ ${selectedText}`;
 }
 
 // Stream Anthropic API response via SSE
-async function streamAnthropicAPI(apiKey, systemPrompt, userMessage, signal, onChunk, onDone, onError) {
+async function streamAnthropicAPI(apiKey, modelConfig, systemPrompt, userMessage, signal, onChunk, onDone, onError) {
   let response;
   try {
     response = await fetch(ANTHROPIC_API_URL, {
@@ -46,10 +56,10 @@ async function streamAnthropicAPI(apiKey, systemPrompt, userMessage, signal, onC
         'anthropic-dangerous-direct-browser-access': 'true'
       },
       body: JSON.stringify({
-        model: MODEL,
+        model: modelConfig.model,
         max_tokens: 700,
         stream: true,
-        thinking: { type: 'disabled' },
+        thinking: modelConfig.thinking,
         output_config: { effort: 'low' },
         system: [
           {
@@ -161,6 +171,7 @@ chrome.runtime.onConnect.addListener((port) => {
 
     await Promise.all(axes.map((axis) => streamAnthropicAPI(
       apiKey,
+      AXIS_MODELS[axis],
       buildSystemPrompt(axis),
       userMessage,
       controller.signal,
